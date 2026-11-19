@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -333,28 +334,60 @@ def _import_sync(name: str, dest: str) -> str:
 
 
 def _pick_directory_sync(initial: str = "") -> str:
+    start = str(initial or "").strip()
+    if not start or not Path(start).is_dir():
+        start = str(folder_paths.get_output_directory())
+
+    # Windows：用系统原生文件夹选择框，避免依赖 tkinter
+    if os.name == "nt":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        powershell = os.path.join(
+            system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+        if not os.path.isfile(powershell):
+            powershell = "powershell.exe"
+        script = (
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$d.Description = '选择图库文件夹'; "
+            "$d.ShowNewFolderButton = $true; "
+            "$d.SelectedPath = $env:PV_INITIAL; "
+            "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+            "{ [Console]::Out.Write($d.SelectedPath) }"
+        )
+        env = os.environ.copy()
+        env["PV_INITIAL"] = start
+        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            result = subprocess.run(
+                [powershell, "-NoProfile", "-STA", "-Command", script],
+                capture_output=True, timeout=600, env=env, creationflags=creation,
+            )
+        except Exception as exc:
+            print(f"[liyue-tools-comfy] 文件夹选择框调用失败：{exc}")
+            raise RuntimeError(f"文件夹选择框调用失败：{exc}") from exc
+        if result.returncode != 0:
+            message = result.stderr.decode("utf-8", "ignore").strip()
+            print(f"[liyue-tools-comfy] 文件夹选择框返回错误：{message}")
+            raise RuntimeError(message or "文件夹选择框启动失败")
+        return result.stdout.decode("utf-8", "ignore").strip()
+
     try:
         import tkinter as tk
         from tkinter import filedialog
     except Exception as exc:
-        raise RuntimeError(f"tkinter 不可用：{exc}") from exc
+        raise RuntimeError(f"当前系统没有可用的文件夹选择框：{exc}") from exc
 
     root = tk.Tk()
     root.withdraw()
     try:
-        root.attributes("-topmost", True)
-        root.lift()
-        root.focus_force()
-    except Exception:
-        pass
-
-    start = str(initial or "").strip()
-    initial_dir = start if start and Path(start).is_dir() else str(folder_paths.get_output_directory())
-    path = filedialog.askdirectory(parent=root, initialdir=initial_dir, title="选择图库文件夹", mustexist=True)
-    try:
-        root.destroy()
-    except Exception:
-        pass
+        path = filedialog.askdirectory(parent=root, initialdir=start, title="选择图库文件夹", mustexist=True)
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
     return str(path or "")
 
 
@@ -397,6 +430,32 @@ def register_routes():
             return web.json_response({"error": str(exc)}, status=500)
         entry["removable"] = True
         return web.json_response({"source": entry, "sources": _all_sources()})
+
+    @routes.get("/prompt_vault/source_add_staged")
+    async def source_add_staged(request):
+        raw = str(request.query.get("name") or "").strip()
+        name = _SAFE_NAME_RE.sub("_", raw).strip(" .")
+        if not name:
+            return web.json_response({"error": "缺少文件夹名"}, status=400)
+
+        folder = _library_dir() / name
+        folder.mkdir(parents=True, exist_ok=True)
+
+        existing = next(
+            (source for source in _all_sources()
+             if Path(source["path"]).resolve() == folder.resolve()),
+            None,
+        )
+        if existing:
+            return web.json_response({"source": existing, "sources": _all_sources()})
+
+        try:
+            entry = interactively_add_source(folder, name)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        link = {"id": entry["id"], "name": entry["name"],
+                "path": entry["path"], "removable": True}
+        return web.json_response({"source": link, "sources": _all_sources()})
 
     @routes.get("/prompt_vault/source_remove")
     async def source_remove(request):
@@ -494,6 +553,21 @@ def register_routes():
         except OSError as exc:
             return web.json_response({"error": str(exc)}, status=500)
         return web.json_response({"path": path})
+
+    @routes.get("/prompt_vault/delete")
+    async def delete_image(request):
+        path = Path(str(request.query.get("path") or ""))
+        if not path.is_file() or not _is_allowed(path):
+            return web.json_response({"error": "文件不存在或不在图库范围内"}, status=404)
+        try:
+            path.unlink()
+            for suffix in (".txt", ".json"):
+                side = path.with_suffix(suffix)
+                if side.is_file():
+                    side.unlink()
+        except OSError as exc:
+            return web.json_response({"error": str(exc)}, status=500)
+        return web.json_response({"success": True})
 
     @routes.get("/prompt_vault/stage_path")
     async def stage_path(request):

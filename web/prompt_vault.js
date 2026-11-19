@@ -122,6 +122,9 @@ const STYLE = `
 }
 .pv-card:hover { border-color: #5b9dff66; }
 .pv-card.is-active { border-color: #5b9dff; box-shadow: 0 0 0 2px #5b9dff33; }
+.pv-card.is-selected { border-color: #ff9b5b; box-shadow: 0 0 0 2px #ff9b5b44; }
+.pv-btn-danger { color: #ffb3b3; }
+.pv-btn-danger:not(:disabled):hover { border-color: #ff7b7b; color: #fff; }
 .pv-card img { width: 100%; display: block; border-radius: 6px; background: #111; }
 .pv-card.is-broken img { min-height: 90px; }
 .pv-card-meta { padding: 4px 2px 0; font-size: 10px; color: #8f8f8f; line-height: 1.5; }
@@ -413,9 +416,12 @@ function ensurePanel() {
   searchInput.type = "search";
   searchInput.placeholder = "搜索文件名…";
   const countLabel = el("span", "pv-count", "0 / 0");
+  const deleteButton = el("button", "pv-btn pv-btn-danger", "删除");
+  deleteButton.title = "删除选中的图片（Ctrl 多选 / Shift 连选）";
+  deleteButton.disabled = true;
   const refreshButton = el("button", "pv-btn", "↻");
   refreshButton.title = "刷新图库";
-  bottomBar.append(searchInput, countLabel, refreshButton);
+  bottomBar.append(searchInput, countLabel, deleteButton, refreshButton);
   main.append(masonry, bottomBar);
 
   const side = el("aside", "pv-side");
@@ -526,8 +532,13 @@ function ensurePanel() {
   mask.append(dialog);
   document.body.append(mask);
 
-  const state = { source: "output", folder: "", query: "", offset: 0, total: 0, busy: false, importTarget: "" };
-  const panel = { mask, state, selectedPath: "", sources: [], expanded: new Set([""]) };
+  const state = {
+    source: "output", folder: "", query: "", offset: 0, total: 0, busy: false,
+    importTarget: "", selected: new Set(), lastPath: "",
+  };
+  const panel = {
+    mask, state, selectedPath: "", sources: [], expanded: new Set([""]), items: [],
+  };
   let searchTimer = 0;
   let promptToken = 0;
 
@@ -541,9 +552,63 @@ function ensurePanel() {
     confirmButton.disabled = !panel.selectedPath;
   }
 
-  function highlight() {
+  function refreshSelection() {
     for (const cell of masonry.querySelectorAll(".pv-card")) {
       cell.classList.toggle("is-active", cell.dataset.path === panel.selectedPath);
+      cell.classList.toggle("is-selected", state.selected.has(cell.dataset.path));
+    }
+    deleteButton.disabled = state.selected.size === 0;
+    deleteButton.textContent = state.selected.size ? `删除 (${state.selected.size})` : "删除";
+  }
+
+  function selectRange(fromPath, toPath) {
+    const entries = [...masonry.querySelectorAll(".pv-card")]
+      .map(card => ({ card, rect: card.getBoundingClientRect() }))
+      .filter(entry => entry.rect.height > 0);
+
+    // 按顶部位置分组为视觉行，行内从左到右
+    entries.sort((a, b) => a.rect.top - b.rect.top || a.rect.left - b.rect.left);
+    const rows = [];
+    for (const entry of entries) {
+      const row = rows[rows.length - 1];
+      if (row && Math.abs(entry.rect.top - row.top) <= 40) {
+        row.items.push(entry);
+      } else {
+        rows.push({ top: entry.rect.top, items: [entry] });
+      }
+    }
+    for (const row of rows) row.items.sort((a, b) => a.rect.left - b.rect.left);
+
+    let fromRow = -1;
+    let fromCol = -1;
+    let toRow = -1;
+    let toCol = -1;
+    rows.forEach((row, rowIndex) => {
+      row.items.forEach((entry, colIndex) => {
+        if (entry.card.dataset.path === fromPath) {
+          fromRow = rowIndex;
+          fromCol = colIndex;
+        }
+        if (entry.card.dataset.path === toPath) {
+          toRow = rowIndex;
+          toCol = colIndex;
+        }
+      });
+    });
+    if (fromRow < 0 || toRow < 0) return;
+
+    if (fromRow > toRow || (fromRow === toRow && fromCol > toCol)) {
+      [fromRow, toRow] = [toRow, fromRow];
+      [fromCol, toCol] = [toCol, fromCol];
+    }
+
+    state.selected.clear();
+    for (let rowIndex = fromRow; rowIndex <= toRow; rowIndex += 1) {
+      const start = rowIndex === fromRow ? fromCol : 0;
+      const end = rowIndex === toRow ? toCol : rows[rowIndex].items.length - 1;
+      for (let colIndex = start; colIndex <= end; colIndex += 1) {
+        state.selected.add(rows[rowIndex].items[colIndex].card.dataset.path);
+      }
     }
   }
 
@@ -604,7 +669,7 @@ function ensurePanel() {
   function selectItem(item) {
     panel.selectedPath = item.path;
     previewImage.src = imageUrl(`/prompt_vault/file?path=${encodeURIComponent(item.path)}`);
-    highlight();
+    refreshSelection();
     refreshFooter();
     void showPrompt(item.path);
   }
@@ -631,7 +696,26 @@ function ensurePanel() {
     if (bottom) meta.append(el("div", null, bottom));
     card.append(meta);
 
-    card.addEventListener("click", () => selectItem(item));
+    card.addEventListener("click", event => {
+      if (event.shiftKey && state.lastPath) {
+        selectRange(state.lastPath, item.path);
+        selectItem(item);
+        return;
+      }
+
+      if (event.ctrlKey || event.metaKey) {
+        if (state.selected.has(item.path)) state.selected.delete(item.path);
+        else state.selected.add(item.path);
+        state.lastPath = item.path;
+        refreshSelection();
+        return;
+      }
+
+      state.selected.clear();
+      state.selected.add(item.path);
+      state.lastPath = item.path;
+      selectItem(item);
+    });
     card.addEventListener("dblclick", () => {
       selectItem(item);
       applySelection();
@@ -785,6 +869,10 @@ function ensurePanel() {
       if (reset) {
         state.offset = 0;
         masonry.innerHTML = "";
+        panel.items = [];
+        state.selected.clear();
+        state.lastPath = "";
+        refreshSelection();
       }
       const url = `/prompt_vault/items?source=${encodeURIComponent(state.source)}`
         + `&folder=${encodeURIComponent(state.folder)}`
@@ -804,9 +892,12 @@ function ensurePanel() {
         masonry.innerHTML = "";
         masonry.append(el("div", "pv-empty", "这个文件夹还没有图片。"));
       }
-      for (const item of items) masonry.append(makeCard(item));
+      for (const item of items) {
+        panel.items.push(item);
+        masonry.append(makeCard(item));
+      }
       countLabel.textContent = `${state.offset} / ${state.total}`;
-      highlight();
+      refreshSelection();
       // 内容不足一屏时自动补下一页，保证能继续滚动
       if (items.length && state.offset < state.total && masonry.scrollHeight <= masonry.clientHeight + 20) {
         setTimeout(() => void loadItems(false), 0);
@@ -913,16 +1004,63 @@ function ensurePanel() {
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
   }
 
+  async function filesFromEntries(entries) {
+    const files = [];
+    const walk = async entry => {
+      if (entry.isFile) {
+        const file = await new Promise(resolve => entry.file(resolve, () => resolve(null)));
+        if (file) files.push(file);
+        return;
+      }
+      if (entry.isDirectory) {
+        const reader = entry.createReader();
+        while (true) {
+          const batch = await new Promise(resolve => reader.readEntries(resolve, () => resolve([])));
+          if (!batch.length) break;
+          for (const child of batch) await walk(child);
+        }
+      }
+    };
+    for (const entry of entries) await walk(entry);
+    return files;
+  }
+
   function onPanelDrop(event) {
     event.preventDefault();
     event.stopPropagation();
+
     const row = event.target?.closest?.(".pv-tree-item") || null;
     const target = row?.dataset?.dropTarget || fallbackDropTarget();
     clearDropHighlight();
-    const files = [...(event.dataTransfer?.files || [])].filter(isImageFile);
-    if (!files.length || !target) return;
-    state.importTarget = target;
-    void handleFiles(files);
+
+    const transfer = event.dataTransfer;
+    const entries = [];
+    for (const item of [...(transfer?.items || [])]) {
+      const entry = item.webkitGetAsEntry?.();
+      if (entry) entries.push(entry);
+    }
+
+    const collect = async () => {
+      // 拖入单个文件夹：浏览器拿不到绝对路径，弹系统选择框按「引用」注册
+      const directories = entries.filter(entry => entry.isDirectory);
+      if (directories.length === 1 && entries.length === 1) {
+        const folder = (window.prompt(
+          `浏览器无法读取拖入文件夹「${directories[0].name}」的完整路径。请粘贴该文件夹的绝对路径（仅引用，不复制）：`,
+          ""
+        ) || "").trim();
+        if (folder) await addSource(folder);
+        return;
+      }
+
+      const files = entries.length
+        ? await filesFromEntries(entries)
+        : [...(transfer?.files || [])];
+      const images = files.filter(isImageFile);
+      if (!images.length || !target) return;
+      state.importTarget = target;
+      void handleFiles(images);
+    };
+    void collect();
   }
 
   function onPanelDragLeave(event) {
@@ -967,22 +1105,8 @@ function ensurePanel() {
     }
   });
 
-  addSourceButton.addEventListener("click", async () => {
-    let folder = window.prompt("输入图库文件夹的绝对路径；留空则打开系统文件夹选择框：", "");
-    if (folder === null) return;
-    folder = folder.trim();
-    addSourceButton.disabled = true;
+  async function addSource(folder) {
     try {
-      if (!folder) {
-        const picked = await api.fetchApi("/prompt_vault/pick_dir");
-        const data = await picked.json();
-        if (!picked.ok) {
-          alert(data.error || "打开文件夹选择框失败，请直接输入路径");
-          return;
-        }
-        folder = String(data.path || "").trim();
-        if (!folder) return;
-      }
       const response = await api.fetchApi(`/prompt_vault/source_add?path=${encodeURIComponent(folder)}`);
       const data = await response.json();
       if (!response.ok) {
@@ -996,10 +1120,43 @@ function ensurePanel() {
       await loadItems(true);
     } catch (error) {
       alert(`添加图库失败：${error}`);
-    } finally {
-      addSourceButton.disabled = false;
     }
+  }
+
+  addSourceButton.addEventListener("click", async () => {
+    const folder = (window.prompt("请粘贴图库文件夹的绝对路径（仅引用，不复制）：", "") || "").trim();
+    if (folder) await addSource(folder);
   });
+
+  async function deleteSelected() {
+    const paths = [...state.selected];
+    if (!paths.length) return;
+    if (!window.confirm(`删除选中的 ${paths.length} 张图片？同名 txt/json 会一起删除，无法恢复。`)) return;
+
+    deleteButton.disabled = true;
+    let failed = 0;
+    for (const path of paths) {
+      try {
+        const response = await api.fetchApi(`/prompt_vault/delete?path=${encodeURIComponent(path)}`);
+        if (!response.ok) failed += 1;
+      } catch (error) {
+        failed += 1;
+      }
+    }
+
+    if (paths.includes(panel.selectedPath)) {
+      panel.selectedPath = "";
+      previewImage.removeAttribute("src");
+      refreshFooter();
+    }
+    state.selected.clear();
+    state.lastIndex = -1;
+    if (failed) alert(`有 ${failed} 张删除失败`);
+    await loadForest();
+    await loadItems(true);
+  }
+
+  deleteButton.addEventListener("click", () => void deleteSelected());
 
   fileInput.addEventListener("change", async () => {
     const files = [...(fileInput.files || [])];
