@@ -1,0 +1,9 @@
+[project]
+name = "liyue-tools-comfy"
+version = "1.0.0"
+description = "ComfyUI 提示词与 LoRA 工具：图库提取提示词 / LoRA 组合，并按组合应用 LoRA"
+dependencies = []
+requires-python = ">=3.10"
+
+[tool.comfy]
+DisplayName = "漓月工具箱"
