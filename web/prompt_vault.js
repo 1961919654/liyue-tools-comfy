@@ -150,6 +150,14 @@ const STYLE = `
   font-size: 11px; text-transform: uppercase; letter-spacing: .6px;
   opacity: .45; margin-top: 2px;
 }
+.pv-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.pv-copy-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 2px 4px; border: none; border-radius: 4px; background: transparent;
+  color: inherit; opacity: .45; cursor: pointer;
+}
+.pv-copy-btn:hover { opacity: 1; background: #ffffff14; }
+.pv-copy-btn:disabled { opacity: .18; cursor: default; background: transparent; }
 .pv-prompt-blocks {
   flex: 1 1 auto; min-height: 0;
   display: flex; flex-direction: column; gap: 6px;
@@ -211,6 +219,47 @@ function el(tag, className, text) {
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+const ICON_COPY =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const ICON_DONE =
+  '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (error) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.append(area);
+    area.select();
+    document.execCommand("copy");
+    area.remove();
+  }
+}
+
+function makeCopyButton(getText) {
+  const button = el("button", "pv-copy-btn");
+  button.type = "button";
+  button.title = "复制";
+  button.disabled = true;
+  button.innerHTML = ICON_COPY;
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    const text = String(getText() || "").trim();
+    if (!text) return;
+    await copyToClipboard(text);
+    button.innerHTML = ICON_DONE;
+    button.title = "已复制";
+    setTimeout(() => {
+      button.innerHTML = ICON_COPY;
+      button.title = "复制";
+    }, 1200);
+  });
+  return button;
 }
 
 function imageUrl(route) {
@@ -430,13 +479,22 @@ function ensurePanel() {
   previewBox.append(previewImage);
   side.append(previewBox);
 
+  let currentPositive = "";
+  let currentNegative = "";
+  const positiveCopyButton = makeCopyButton(() => currentPositive);
+  const negativeCopyButton = makeCopyButton(() => currentNegative);
+
   const promptBlocks = el("div", "pv-prompt-blocks");
   const positiveBlock = el("div", "pv-prompt-block is-positive");
-  positiveBlock.append(el("div", "pv-label", "正向提示词"));
+  const positiveHead = el("div", "pv-prompt-head");
+  positiveHead.append(el("div", "pv-label", "正向提示词"), positiveCopyButton);
+  positiveBlock.append(positiveHead);
   const positiveBox = el("div", "pv-prompt-box is-empty", "选择中间图片后显示正向提示词。");
   positiveBlock.append(positiveBox);
   const negativeBlock = el("div", "pv-prompt-block is-negative");
-  negativeBlock.append(el("div", "pv-label", "负向提示词"));
+  const negativeHead = el("div", "pv-prompt-head");
+  negativeHead.append(el("div", "pv-label", "负向提示词"), negativeCopyButton);
+  negativeBlock.append(negativeHead);
   const negativeBox = el("div", "pv-prompt-box is-empty", "这张图没有负向提示词。");
   negativeBlock.append(negativeBox);
   promptBlocks.append(positiveBlock, negativeBlock);
@@ -616,10 +674,14 @@ function ensurePanel() {
     const loras = Array.isArray(info.loras) ? info.loras : [];
     const positive = String(info.positive || "").trim();
     const negative = String(info.negative || "").trim();
+    currentPositive = positive;
+    currentNegative = negative;
     positiveBox.textContent = positive || "这张图没有正向提示词。";
     positiveBox.classList.toggle("is-empty", !positive);
+    positiveCopyButton.disabled = !positive;
     negativeBox.textContent = negative || "这张图没有负向提示词。";
     negativeBox.classList.toggle("is-empty", !negative);
+    negativeCopyButton.disabled = !negative;
 
     loraBox.innerHTML = "";
     if (!loras.length) {

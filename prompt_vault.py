@@ -75,6 +75,16 @@ def _resolve_text(value, prompt: dict, depth: int = 0) -> str:
             text = _resolve_text(inputs[key], prompt, depth + 1)
             if text:
                 return text
+
+    # 兜底：任意字符串输入中最长的提示词（如 K2EditorialBuilder 的 k2ed_提示词）
+    loose = []
+    for key, candidate in inputs.items():
+        if "lora" in str(key).lower():
+            continue
+        if isinstance(candidate, str) and _looks_like_prompt(candidate):
+            loose.append(candidate)
+    if loose:
+        return max(loose, key=len)
     return ""
 
 
@@ -622,6 +632,12 @@ def read_prompt(path: Path) -> dict:
         data["checkpoint"] = data["checkpoint"] or extras["checkpoint"]
         if data["seed"] is None:
             data["seed"] = extras["seed"]
+
+    # K2-Editorial 等插件把完整提示词单独写进 k2ed_prompt 文本块
+    k2_prompt = png_text.get("k2ed_prompt")
+    if not data["positive"] and isinstance(k2_prompt, str) and k2_prompt.strip():
+        data["positive"] = k2_prompt.strip()
+        data["source"] = data["source"] or "k2ed"
 
     # A1111 / WebUI 风格的 parameters 文本块
     a1111 = {"positive": "", "negative": "", "seed": None, "checkpoint": "", "loras": []}
