@@ -115,6 +115,13 @@ const STYLE = `
   flex: 1 1 0; min-height: 0; overflow-y: auto; overflow-x: hidden;
   columns: 4 140px; column-gap: 8px; padding: 2px 2px 6px;
 }
+.pv-masonry.is-grid {
+  columns: auto; display: grid; align-content: start; gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+.pv-masonry.is-grid .pv-card { margin: 0; display: flex; flex-direction: column; }
+.pv-masonry.is-grid .pv-card img { aspect-ratio: 1 / 1; object-fit: cover; }
+.pv-masonry.is-grid .pv-card-meta { flex: 1 1 auto; }
 .pv-card {
   break-inside: avoid; margin: 0 0 10px; padding: 3px;
   border: 2px solid transparent; border-radius: 8px;
@@ -136,6 +143,18 @@ const STYLE = `
 .pv-empty { padding: 34px 10px; text-align: center; opacity: .55; column-span: all; }
 .pv-bottom { display: flex; gap: 8px; align-items: center; }
 .pv-bottom .pv-btn { flex: 0 0 auto; padding: 6px 16px; }
+.pv-view-toggle, .pv-order-toggle {
+  flex: 0 0 auto; width: 30px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.pv-bottom .pv-view-toggle, .pv-bottom .pv-order-toggle { padding: 6px 0; }
+.pv-sort {
+  flex: 0 0 auto; padding: 6px 8px; border-radius: 7px; cursor: pointer;
+  background: var(--comfy-input-bg, #262626); color: inherit;
+  border: 1px solid var(--border-color, #3d3d3d); outline: none; font-size: 12px;
+}
+.pv-sort:hover { border-color: #5b9dff; }
+.pv-sort option { background: #262626; color: #e6e6e6; }
 
 .pv-side {
   width: 330px; flex: 0 0 330px; display: flex; flex-direction: column; gap: 8px;
@@ -225,6 +244,10 @@ const ICON_COPY =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const ICON_DONE =
   '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+const ICON_MASONRY =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="10" rx="1"/><rect x="14" y="3" width="7" height="6" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>';
+const ICON_GRID =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>';
 
 async function copyToClipboard(text) {
   try {
@@ -465,12 +488,26 @@ function ensurePanel() {
   searchInput.type = "search";
   searchInput.placeholder = "搜索文件名…";
   const countLabel = el("span", "pv-count", "0 / 0");
+  const viewButton = el("button", "pv-btn pv-view-toggle");
+  viewButton.type = "button";
+  const sortSelect = el("select", "pv-sort");
+  sortSelect.title = "排序方式";
+  for (const [value, label] of [
+    ["date", "修改日期"], ["name", "文件名"], ["size", "文件大小"], ["resolution", "分辨率"],
+  ]) {
+    const option = el("option", null, label);
+    option.value = value;
+    sortSelect.append(option);
+  }
+  const orderButton = el("button", "pv-btn pv-order-toggle");
+  orderButton.type = "button";
   const deleteButton = el("button", "pv-btn pv-btn-danger", "删除");
   deleteButton.title = "删除选中的图片（Ctrl 多选 / Shift 连选）";
   deleteButton.disabled = true;
   const refreshButton = el("button", "pv-btn", "↻");
   refreshButton.title = "刷新图库";
-  bottomBar.append(searchInput, countLabel, deleteButton, refreshButton);
+  bottomBar.append(searchInput, viewButton, sortSelect, orderButton,
+    countLabel, deleteButton, refreshButton);
   main.append(masonry, bottomBar);
 
   const side = el("aside", "pv-side");
@@ -593,11 +630,48 @@ function ensurePanel() {
   const state = {
     source: "output", folder: "", query: "", offset: 0, total: 0, busy: false,
     importTarget: "", selected: new Set(), lastPath: "",
+    view: "masonry", sort: "date", order: "desc",
   };
   const panel = {
     mask, state, selectedPath: "", sources: [], expanded: new Set([""]), items: [],
   };
   let searchTimer = 0;
+
+  // 恢复上次的视图与排序偏好
+  try {
+    state.view = localStorage.getItem("pv.view") === "grid" ? "grid" : "masonry";
+    const savedSort = localStorage.getItem("pv.sort");
+    if (["date", "name", "size", "resolution"].includes(savedSort)) state.sort = savedSort;
+    const savedOrder = localStorage.getItem("pv.order");
+    if (savedOrder === "asc" || savedOrder === "desc") state.order = savedOrder;
+  } catch (error) {
+    /* 本地存储不可用时使用默认值 */
+  }
+
+  function savePrefs() {
+    try {
+      localStorage.setItem("pv.view", state.view);
+      localStorage.setItem("pv.sort", state.sort);
+      localStorage.setItem("pv.order", state.order);
+    } catch (error) {
+      /* 无痕模式等场景忽略 */
+    }
+  }
+
+  function applyView() {
+    const grid = state.view === "grid";
+    masonry.classList.toggle("is-grid", grid);
+    viewButton.innerHTML = grid ? ICON_MASONRY : ICON_GRID;
+    viewButton.title = grid ? "切换为瀑布流视图" : "切换为平铺视图";
+    sortSelect.value = state.sort;
+    orderButton.textContent = state.order === "asc" ? "↑" : "↓";
+    orderButton.title = state.order === "asc"
+      ? "当前升序，点击切换为降序"
+      : "当前降序，点击切换为升序";
+  }
+
+  applyView();
+
   let promptToken = 0;
 
   function currentSource() {
@@ -931,6 +1005,7 @@ function ensurePanel() {
       if (reset) {
         state.offset = 0;
         masonry.innerHTML = "";
+        masonry.scrollTop = 0;
         panel.items = [];
         state.selected.clear();
         state.lastPath = "";
@@ -938,7 +1013,8 @@ function ensurePanel() {
       }
       const url = `/prompt_vault/items?source=${encodeURIComponent(state.source)}`
         + `&folder=${encodeURIComponent(state.folder)}`
-        + `&q=${encodeURIComponent(state.query)}&offset=${state.offset}&limit=${PAGE_SIZE}`;
+        + `&q=${encodeURIComponent(state.query)}&offset=${state.offset}&limit=${PAGE_SIZE}`
+        + `&sort=${encodeURIComponent(state.sort)}&order=${encodeURIComponent(state.order)}`;
       const response = await api.fetchApi(url);
       const data = await response.json();
       if (!response.ok) {
@@ -1132,6 +1208,25 @@ function ensurePanel() {
   mask.addEventListener("dragover", onPanelDragOver, true);
   mask.addEventListener("drop", onPanelDrop, true);
   mask.addEventListener("dragleave", onPanelDragLeave, true);
+
+  viewButton.addEventListener("click", () => {
+    state.view = state.view === "grid" ? "masonry" : "grid";
+    applyView();
+    savePrefs();
+  });
+
+  sortSelect.addEventListener("change", () => {
+    state.sort = sortSelect.value;
+    savePrefs();
+    void loadItems(true);
+  });
+
+  orderButton.addEventListener("click", () => {
+    state.order = state.order === "asc" ? "desc" : "asc";
+    applyView();
+    savePrefs();
+    void loadItems(true);
+  });
 
   searchInput.addEventListener("input", () => {
     clearTimeout(searchTimer);

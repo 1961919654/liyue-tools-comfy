@@ -150,7 +150,15 @@ def _image_size(path: Path, modified: float) -> tuple[int, int]:
     return width, height
 
 
-def _list_sync(source_id: str, folder: str, query: str, offset: int, limit: int) -> dict:
+def _list_sync(
+    source_id: str,
+    folder: str,
+    query: str,
+    offset: int,
+    limit: int,
+    sort: str = "date",
+    order: str = "desc",
+) -> dict:
     source = _find_source(source_id)
     if source is None:
         raise ValueError("图库不存在")
@@ -191,7 +199,20 @@ def _list_sync(source_id: str, folder: str, query: str, offset: int, limit: int)
         if scanned > _MAX_FILES or len(rows) >= _MAX_SCAN:
             break
 
-    rows.sort(key=lambda item: item[0], reverse=True)
+    # 先按文件名稳定排序，再按主键排序，保证同值时顺序稳定
+    rows.sort(key=lambda item: item[1].lower())
+    reverse = order != "asc"
+    if sort == "name":
+        rows.sort(key=lambda item: item[1].lower(), reverse=reverse)
+    elif sort == "size":
+        rows.sort(key=lambda item: item[3], reverse=reverse)
+    elif sort == "resolution":
+        def _area(item):
+            width, height = _image_size(item[2], item[0])
+            return width * height
+        rows.sort(key=_area, reverse=reverse)
+    else:
+        rows.sort(key=lambda item: item[0], reverse=reverse)
     total = len(rows)
     items = []
     for modified, relative, path, size in rows[offset:offset + limit]:
@@ -477,8 +498,16 @@ def register_routes():
             limit = min(120, max(1, int(request.query.get("limit", 60) or 60)))
         except ValueError:
             return web.json_response({"error": "分页参数错误"}, status=400)
+        sort = str(request.query.get("sort") or "date").lower()
+        if sort not in {"date", "name", "size", "resolution"}:
+            sort = "date"
+        order = str(request.query.get("order") or "desc").lower()
+        if order not in {"asc", "desc"}:
+            order = "desc"
         try:
-            payload = await asyncio.to_thread(_list_sync, source_id, folder, query, offset, limit)
+            payload = await asyncio.to_thread(
+                _list_sync, source_id, folder, query, offset, limit, sort, order
+            )
         except ValueError as exc:
             return web.json_response({"error": str(exc)}, status=400)
         except OSError as exc:
